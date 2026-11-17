@@ -14,6 +14,14 @@
         ],
         "adaptable": true,
         "notes": "Adapter-selected CPU subset of the 51-task upstream matrix. Other agent interfaces remain available upstream; only oracles are evaluated here."
+      },
+      {
+        "split": "gpu",
+        "size": 3,
+        "harness": "agent",
+        "supported_agents": ["oracle@harbor-0.21.0"],
+        "adaptable": true,
+        "notes": "Adapter-selected GPU subset of the upstream matrix."
       }
     ],
     "harbor_adapter": [
@@ -33,7 +41,19 @@
           "None"
         ],
         "parity_costs": "$0",
-        "notes": "Five of five full oracle equivalence checks passed. This records oracle coverage only, not statistical model-agent parity. One complete run per side; SEM undefined. Task06 deterministic scores match exactly and its unchanged timing accounting is checked separately; task07 reward and deterministic outcomes match; task08/task09 full reports match. Registry publication not performed. Native baseline oracles accepted per user-reported organizer coordination on 2026-11-16. GPU testing is work in progress; no GPU results are included."
+        "notes": "Five of five full oracle equivalence checks passed. This records oracle coverage only, not statistical model-agent parity. One complete run per side; SEM undefined. Task06 deterministic scores match exactly and its unchanged timing accounting is checked separately; task07 reward and deterministic outcomes match; task08/task09 full reports match. Registry publication not performed. Native baseline oracles accepted per user-reported organizer coordination on 2026-11-16."
+      },
+      {
+        "split": "gpu",
+        "adapted_benchmark_size": 3,
+        "parity_benchmark_size": 3,
+        "parity_sampling_rate": 1.0,
+        "registry_benchmark_size": 0,
+        "added_agents": ["None"],
+        "parity_matching_agents": ["oracle@harbor-0.21.0"],
+        "parity_unmatching_agents": ["None"],
+        "parity_costs": "$0",
+        "notes": "Two native runs and one adapted run per task on an RTX 3080 Ti. Both task03 tasks matched the complete reward JSON and passed the upstream ledger, handoff and isolation checks. Task06 method-agnostic matched all deterministic metrics and retained the original timing deduction. Oracle equivalence only; registry publication pending."
       }
     ]
   }

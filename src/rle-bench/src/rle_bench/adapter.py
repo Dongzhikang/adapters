@@ -1,4 +1,4 @@
-"""Export native RLE-Bench CPU tasks with self-contained Docker build contexts."""
+"""Export native RLE-Bench tasks with self-contained Docker build contexts."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -26,6 +26,7 @@ LOG = logging.getLogger(__name__)
 class TaskSpec:
     task_id: str
     upstream_path: str
+    gpu: bool = False
 
     @property
     def family(self) -> str:
@@ -38,6 +39,11 @@ TASKS = (
     TaskSpec("task07", "task07"),
     TaskSpec("task08", "task08"),
     TaskSpec("task09", "task09"),
+)
+GPU_TASKS = (
+    TaskSpec("task03-01-tower-max-height", "task03/01-tower-max-height", gpu=True),
+    TaskSpec("task03-05-hidden-center-of-mass", "task03/05-hidden-center-of-mass", gpu=True),
+    TaskSpec("task06-method-agnostic", "task06/method-agnostic", gpu=True),
 )
 _SHARED_FILES = ("__init__.py", "core/__init__.py", "core/model.py",
                  "core/scoring.py", "core/media.py")
@@ -65,19 +71,21 @@ def portable_config(text: str) -> str:
     return "".join(lines)
 
 
-def select_tasks(task_ids: list[str] | None, limit: int | None) -> tuple[TaskSpec, ...]:
+def select_tasks(task_ids: list[str] | None, limit: int | None, *,
+                 split: str = "cpu") -> tuple[TaskSpec, ...]:
     if limit is not None and limit < 1:
         raise ValueError("--limit must be positive")
-    aliases = {alias: task for task in TASKS
+    catalog = {"cpu": TASKS, "gpu": GPU_TASKS}[split]
+    aliases = {alias: task for task in catalog
                for alias in (task.task_id, task.upstream_path)}
     if task_ids:
         unknown = set(task_ids) - aliases.keys()
         if unknown:
-            raise ValueError(f"Unknown/non-CPU task IDs: {', '.join(sorted(unknown))}")
+            raise ValueError(f"Unknown/non-{split.upper()} task IDs: {', '.join(sorted(unknown))}")
         wanted = {aliases[name] for name in task_ids}
-        selected = tuple(task for task in TASKS if task in wanted)
+        selected = tuple(task for task in catalog if task in wanted)
     else:
-        selected = TASKS
+        selected = catalog
     return selected[:limit] if limit else selected
 
 
@@ -111,20 +119,47 @@ def _copy_tree(source: Path, destination: Path) -> None:
     shutil.copytree(source, destination, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
 
 
+def _bundle_task03_environment(source: Path, native: Path, destination: Path) -> None:
+    """Link the two upstream recipes as local Docker stages."""
+    family = native.parent
+    context = "image-hidden-com" if native.name == "05-hidden-center-of-mass" else "image"
+    _copy_tree(family / context, destination)
+    shutil.copy2(native / "environment/docker-compose.yaml", destination)
+    simulator = source / "sim/robocasa"
+    base = (simulator / "base/Dockerfile").read_text()
+    pins = dict(line.split("=", 1) for line in (simulator / "pins.env").read_text().splitlines()
+                if line and not line.startswith("#"))
+    base = base.replace("\nFROM python:3.11-slim\n", "\nFROM python:3.11-slim AS sim-base\n", 1)
+    for key in ("ROBOSUITE_SHA", "ROBOCASA_SHA", "ROBOCASA_ASSET_VERSION"):
+        base = base.replace(f"\nARG {key}\n", f"\nARG {key}={pins[key]}\n", 1)
+    for name in ("smoke.py", "verify_assets.py", "rlebench_ro_assets.py"):
+        shutil.copy2(simulator / "base" / name, destination)
+    dockerfile = destination / "Dockerfile"
+    task = dockerfile.read_text()
+    task = task.replace("FROM ${SIM_IMAGE} AS agent-base", "FROM sim-base AS agent-base", 1)
+    task = task.replace("FROM ${MODELS} AS final", "FROM models-off AS final", 1)
+    if "FROM sim-base AS agent-base" not in task or "AS sim-base" not in base:
+        raise ValueError("Task03 upstream Docker build layout changed")
+    dockerfile.write_text(base.rstrip() + "\n\n" + task)
+
+
 def export_task(source: Path, spec: TaskSpec, destination: Path) -> None:
     native = source / "tasks" / spec.upstream_path
     original = tomllib.loads((native / "task.toml").read_text())
-    if original["environment"].get("gpus", 0):
-        raise ValueError(f"Refusing GPU task {spec.upstream_path}")
+    if bool(original["environment"].get("gpus", 0)) != spec.gpu:
+        raise ValueError(f"Unexpected GPU declaration: {spec.upstream_path}")
     destination.mkdir()
     for name in ("instruction.md", "README.md"):
         if (native / name).exists():
             shutil.copy2(native / name, destination / name)
-    for name in ("environment", "solution"):
-        _copy_tree(native / name, destination / name)
+    if spec.family == "task03":
+        _bundle_task03_environment(source, native, destination / "environment")
+    else:
+        _copy_tree(native / "environment", destination / "environment")
+    _copy_tree(native / "solution", destination / "solution")
 
     tests = destination / "tests"
-    if spec.family == "task07":
+    if spec.family in {"task03", "task07"}:
         _copy_tree(native / "tests", tests)
     else:
         # Preserve repository-root COPY paths, so upstream Dockerfiles stay verbatim.
@@ -140,9 +175,21 @@ def export_task(source: Path, spec: TaskSpec, destination: Path) -> None:
             shutil.copy2(source / "rlebench" / name, target)
 
     config = portable_config((native / "task.toml").read_text())
+    changes = ["Remove local prebuilt image references; preserve all other config",
+               "Bundle repository-root verifier COPY inputs under tests/"]
+    if spec.family == "task03":
+        name = original["task"]["name"]
+        authors = [{"name": "Haitong Ma", "email": "haitongma@g.harvard.edu"}]
+        config = config.replace(f'name = "{name}"\n',
+                                f'name = "{name.lower()}"\n'
+                                'authors = [{ name = "Haitong Ma", email = "haitongma@g.harvard.edu" }]\n', 1)
+        original["task"].update(name=name.lower(), authors=authors)
+        changes = ["Bundle original simulator and agent build recipes as local Docker stages",
+                   "Remove local image reference; normalize registry name and credit upstream authors",
+                   "Keep the native root-only verifier, ledger and collect hook in the shared environment"]
     (destination / "task.toml").write_text(config)
     parsed = tomllib.loads(config)
-    for section in (original["environment"], original["verifier"]["environment"]):
+    for section in (original["environment"], original["verifier"].get("environment", {})):
         section.pop("docker_image", None)
     if parsed != original:
         raise ValueError(f"Unexpected task configuration changes: {spec.task_id}")
@@ -156,18 +203,19 @@ def export_task(source: Path, spec: TaskSpec, destination: Path) -> None:
     provenance = {"adapter": "rle-bench", "upstream_url": UPSTREAM_URL,
                   "upstream_commit": UPSTREAM_COMMIT, "upstream_task": spec.upstream_path,
                   "task_id": spec.task_id, "task_name": parsed["task"]["name"],
-                  "changes": ["Remove local prebuilt image references; preserve all other config",
-                              "Bundle repository-root verifier COPY inputs under tests/"],
+                  "changes": changes,
                   "file_sha256": files}
     (tests / PROVENANCE).write_text(json.dumps(provenance, indent=2) + "\n")
 
 
 class RLEBenchAdapter:
     def __init__(self, output_dir: Path, limit: int | None = None, overwrite: bool = False,
-                 task_ids: list[str] | None = None, source_dir: Path | None = None):
+                 task_ids: list[str] | None = None, source_dir: Path | None = None,
+                 split: str = "cpu"):
         self.output_dir = Path(output_dir).resolve()
         self.source_dir = Path(source_dir).resolve() if source_dir else None
-        self.tasks = select_tasks(task_ids, limit)
+        self.tasks = select_tasks(task_ids, limit, split=split)
+        self.split = split
         self.overwrite = overwrite
 
     def _check_output(self) -> None:
@@ -177,7 +225,8 @@ class RLEBenchAdapter:
         marker = self.output_dir / ROOT_MARKER
         if self.output_dir.exists() and any(self.output_dir.iterdir()):
             owner = json.loads(marker.read_text()) if marker.is_file() else {}
-            if owner.get("adapter") != "rle-bench" or owner.get("upstream_commit") != UPSTREAM_COMMIT:
+            if (owner.get("adapter") != "rle-bench" or owner.get("upstream_commit") != UPSTREAM_COMMIT
+                    or owner.get("split", "cpu") != self.split):
                 raise FileExistsError("Refusing non-empty output not owned by this pinned adapter")
         for spec in self.tasks:
             target = self.output_dir / spec.task_id
@@ -195,12 +244,21 @@ class RLEBenchAdapter:
         with tempfile.TemporaryDirectory(prefix="rle-bench-source-") as temporary:
             source = _snapshot(Path(temporary), self.source_dir)
             for family in dict.fromkeys(task.family for task in self.tasks):
-                subprocess.run([sys.executable, str(source / "tasks" / family / "build_assets.py")],
-                               cwd=source, check=True)
+                if family == "task03":
+                    for spec in self.tasks:
+                        if spec.family == family:
+                            subprocess.run([sys.executable, "tasks/task03/build_levels.py",
+                                            "--cell", Path(spec.upstream_path).name], cwd=source, check=True)
+                else:
+                    subprocess.run([sys.executable, str(source / "tasks" / family / "build_assets.py")],
+                                   cwd=source, check=True)
             self.output_dir.mkdir(parents=True, exist_ok=True)
-            (self.output_dir / ROOT_MARKER).write_text(json.dumps({
+            marker = {
                 "adapter": "rle-bench", "upstream_commit": UPSTREAM_COMMIT,
-                "upstream_url": UPSTREAM_URL}, indent=2) + "\n")
+                "upstream_url": UPSTREAM_URL}
+            if self.split == "gpu":
+                marker["split"] = "gpu"
+            (self.output_dir / ROOT_MARKER).write_text(json.dumps(marker, indent=2) + "\n")
             for spec in self.tasks:
                 with tempfile.TemporaryDirectory(prefix=".rle-bench-export-", dir=self.output_dir) as staging:
                     staged = Path(staging) / spec.task_id
@@ -227,7 +285,7 @@ class RLEBenchAdapter:
         from harbor.publisher.packager import Packager
 
         tasks = []
-        for spec in TASKS:
+        for spec in GPU_TASKS if self.split == "gpu" else TASKS:
             path = self.output_dir / spec.task_id
             if not (path / "tests" / PROVENANCE).is_file():
                 continue
@@ -235,11 +293,11 @@ class RLEBenchAdapter:
             digest, _ = Packager.compute_content_hash(path)
             tasks.append(DatasetTaskRef(name=task["name"], digest=f"sha256:{digest}"))
         manifest = DatasetManifest(dataset=DatasetInfo(
-            name=DATASET_NAME,
-            description="Five CPU-only RLE-Bench tasks. Native instructions, baselines, scoring and budgets are preserved.",
+            name="rlebench/rle-bench-gpu" if self.split == "gpu" else DATASET_NAME,
+            description=f"RLE-Bench {self.split.upper()} tasks with their native instructions, baselines, scoring and budgets.",
             authors=[Author(name="Haitong Ma", email="haitongma@g.harvard.edu"),
                      Author(name="Dongzhikang", email="darrendong@qq.com")],
-            keywords=["robotics", "mujoco", "cpu"]), tasks=tasks,
+            keywords=["robotics", "mujoco", self.split]), tasks=tasks,
             files=[DatasetFileRef(path=name, digest=f"sha256:{sha256(self.output_dir / name)}")
                    for name in ("LICENSE", "THIRD_PARTY_NOTICES.md", ROOT_MARKER)])
         (self.output_dir / "dataset.toml").write_text(manifest.to_toml())

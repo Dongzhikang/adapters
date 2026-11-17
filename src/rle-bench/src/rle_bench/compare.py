@@ -6,7 +6,7 @@ import json
 import math
 from pathlib import Path
 
-from .adapter import TASKS, UPSTREAM_COMMIT
+from .adapter import TASKS, UPSTREAM_COMMIT, TaskSpec, select_tasks
 
 _PERCEPTION_TIMING = frozenset(("reward", "efficiency_deduction", "frame_time_s",
                                "inference_hz", "inference_wall_s"))
@@ -14,8 +14,6 @@ _POLICY_TIMING = frozenset(("reset_wall_s", "act_wall_s", "policy_wall_s",
                           "episode_wall_s", "harness_wall_s", "episode_wall_s_total",
                           "policy_wall_s_total", "harness_wall_s_total"))
 _PACKAGE_NAMES = {
-    "rlebench/task06-rgb-only": "task06-rgb-only",
-    "rlebench/task06-rgb-depth": "task06-rgb-depth",
     "rlebench/task07-bin-clearing": "task07",
     "rlebench/task08-mobile-manipulator-from-scratch": "task08",
     "rlebench/task09-gello-codesign-multirobot": "task09",
@@ -111,24 +109,53 @@ def compare_reports(task_id: str, original: dict, adapted: dict) -> dict:
     return result
 
 
-def load_trials(root: Path) -> dict[str, tuple[dict, Path]]:
-    aliases = {alias: spec.task_id for spec in TASKS
-               for alias in (spec.task_id, Path(spec.upstream_path).name)}
-    aliases.update(_PACKAGE_NAMES)
+def _task03_report(verifier: Path, rewards: dict) -> dict:
+    score = json.loads((verifier / "reward.json").read_text())
+    diagnosis = json.loads((verifier / "diagnosis.json").read_text())
+    trials = score.get("trials_total", 0)
+    if (score != rewards or diagnosis.get("phase") != "finished"
+            or diagnosis.get("ledger_ok") is not True or diagnosis.get("handoff_ok") is not True
+            or diagnosis.get("infrastructure_failures") != 0 or diagnosis.get("failures")
+            or score.get("infrastructure_failures") != 0 or trials <= 0
+            or trials != score.get("trials_recorded") or trials != score.get("trials_attempted")):
+        raise ValueError(f"Incomplete or invalid task03 verification: {verifier}")
+    return {**score, "diagnosis": diagnosis}
+
+
+def load_trials(root: Path, specs: tuple[TaskSpec, ...] = TASKS) -> dict[str, tuple[dict, Path]]:
+    selected = {spec.task_id for spec in specs}
+    aliases = {name: task_id for name, task_id in _PACKAGE_NAMES.items() if task_id in selected}
+    for spec in specs:
+        slug = Path(spec.upstream_path).name
+        aliases.update({spec.task_id: spec.task_id, slug: spec.task_id})
+        if spec.family == "task03":
+            aliases[f"rlebench/task03-l1-{slug}"] = spec.task_id
+        elif spec.family == "task06":
+            aliases[f"rlebench/{spec.task_id}"] = spec.task_id
     trials = {}
     for path in sorted(root.rglob("result.json")):
         trial = json.loads(path.read_text())
         if "trial_name" not in trial:
             continue
-        task_id = aliases.get(trial.get("task_name"))
+        task_id = aliases.get(str(trial.get("task_name", "")).lower())
         if task_id is None:
             continue
         if task_id in trials:
             raise ValueError(f"More than one trial for {task_id}; select a single run directory")
         if trial.get("exception_info") or not trial.get("verifier_result"):
             raise ValueError(f"Unsuccessful Harbor trial: {path}")
-        report = path.parent / "verifier/report.json"
-        trials[task_id] = (json.loads(report.read_text()), path)
+        exit_code = path.parent / "agent/exit-code.txt"
+        if exit_code.is_file() and exit_code.read_text().strip() != "0":
+            raise ValueError(f"Unsuccessful Oracle execution: {exit_code}")
+        verifier = path.parent / "verifier"
+        rewards = trial["verifier_result"]["rewards"]
+        if task_id.startswith("task03-"):
+            report = _task03_report(verifier, rewards)
+        else:
+            report = json.loads((verifier / "report.json").read_text())
+            if report["reward"] != rewards["reward"]:
+                raise ValueError(f"Report reward disagrees with Harbor reward: {verifier}")
+        trials[task_id] = (report, path)
     return trials
 
 
@@ -136,14 +163,21 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--original-jobs", type=Path, required=True)
     parser.add_argument("--harbor-jobs", type=Path, required=True)
+    parser.add_argument("--split", choices=("cpu", "gpu"), default="cpu")
+    parser.add_argument("--task-ids", nargs="+", help="Task IDs or native selectors in the selected split")
     parser.add_argument("--output-file", type=Path, default=Path("oracle_equivalence.json"))
     args = parser.parse_args()
-    original, adapted = load_trials(args.original_jobs), load_trials(args.harbor_jobs)
-    missing = [spec.task_id for spec in TASKS if spec.task_id not in original or spec.task_id not in adapted]
+    try:
+        specs = select_tasks(args.task_ids, None, split=args.split)
+        original = load_trials(args.original_jobs, specs)
+        adapted = load_trials(args.harbor_jobs, specs)
+    except (ValueError, OSError) as error:
+        parser.exit(1, f"error: {error}\n")
+    missing = [spec.task_id for spec in specs if spec.task_id not in original or spec.task_id not in adapted]
     if missing:
         parser.exit(1, f"Missing completed trials: {', '.join(missing)}\n")
     results = []
-    for spec in TASKS:
+    for spec in specs:
         a, a_path = original[spec.task_id]
         b, b_path = adapted[spec.task_id]
         result = compare_reports(spec.task_id, a, b)

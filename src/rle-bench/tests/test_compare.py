@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+from rle_bench.adapter import select_tasks
 from rle_bench.compare import compare_reports, load_trials
 
 
@@ -93,3 +94,24 @@ def test_registry_names_are_resolved_and_duplicate_attempts_are_rejected(tmp_pat
     (duplicate / "verifier/report.json").write_text(json.dumps(dict(reward=.0572)))
     with pytest.raises(ValueError, match="More than one trial"):
         load_trials(tmp_path)
+
+
+def test_task03_requires_completed_ledger_and_handoff(tmp_path):
+    verifier = tmp_path / "verifier"
+    verifier.mkdir()
+    reward = {"reward": .264, "trials_total": 1, "trials_recorded": 1,
+              "trials_attempted": 1, "infrastructure_failures": 0}
+    result = {"trial_name": "tower", "task_name": "rlebench/task03-L1-01-tower-max-height",
+              "verifier_result": {"rewards": reward}}
+    diagnosis = {"phase": "finished", "ledger_ok": True, "handoff_ok": True,
+                 "infrastructure_failures": 0, "failures": []}
+    (tmp_path / "result.json").write_text(json.dumps(result))
+    (verifier / "reward.json").write_text(json.dumps(reward))
+    (verifier / "diagnosis.json").write_text(json.dumps(diagnosis))
+    specs = select_tasks(["task03/01-tower-max-height"], None, split="gpu")
+    assert load_trials(tmp_path) == {}
+    assert load_trials(tmp_path, specs)[specs[0].task_id][0]["diagnosis"] == diagnosis
+    diagnosis["handoff_ok"] = False
+    (verifier / "diagnosis.json").write_text(json.dumps(diagnosis))
+    with pytest.raises(ValueError, match="Incomplete or invalid task03 verification"):
+        load_trials(tmp_path, specs)

@@ -1,24 +1,25 @@
-# RLE-Bench CPU → Harbor
+# RLE-Bench → Harbor
 
 ## Overview
 
-This adapter exports five CPU tasks from RLE-Bench into independently buildable
-Harbor task directories. It preserves native instructions, reference submissions,
-verifier code, numeric scoring, hidden scenarios and resource budgets.
+This adapter exports a default CPU split and an opt-in GPU split from RLE-Bench
+into independently buildable Harbor task directories. It preserves native
+instructions, reference submissions, verifier code, numeric scoring, hidden
+scenarios and resource budgets.
 
 - Upstream: [RLE-Bench/RLE-Bench](https://github.com/RLE-Bench/RLE-Bench).
 - Source revision: `c6bf572283b5453c0ee76eaa3054f23d691e433d`.
 - Harness: `harbor==0.21.0`, matching that upstream revision.
-- Dataset identifier: `rlebench/rle-bench-cpu` (not yet published).
-- Status: CPU oracle equivalence validated; GPU testing is work in progress.
-  This contribution currently contains CPU tasks and CPU results only.
+- Dataset identifiers `rlebench/rle-bench-cpu` and `rlebench/rle-bench-gpu`.
+- Oracle equivalence validated locally for the tasks listed below. Registry
+  publication remains pending.
 
 ## What is RLE-Bench?
 
 RLE-Bench evaluates coding agents acting as robotics engineers. Agents develop
 perception algorithms, robot policies, mechanical designs and controllers;
-simulators evaluate their submitted behavior. This adapter selects five CPU tasks
-from the nine-family, 51-task upstream matrix. GPU tasks are deferred.
+simulators evaluate their submitted behavior. The splits select tasks from the
+nine-family, 51-task upstream matrix.
 
 | Exported task ID | Native selector | Agent work | Native oracle |
 | --- | --- | --- | --- |
@@ -27,22 +28,26 @@ from the nine-family, 51-task upstream matrix. GPU tasks are deferred.
 | `task07` | `task07` | Clear a bin with a magnet-tipped Panda | Public depth baseline policy |
 | `task08` | `task08` | Design a common mobile base and shelf controller | Reference chassis and controller |
 | `task09` | `task09` | Co-design three GELLO lead arms and compensation | Three pinned hardware/software submissions |
+| `task03-01-tower-max-height` | `task03/01-tower-max-height` (GPU) | Build the tallest stable tower | Replay of upstream recorded controls |
+| `task03-05-hidden-center-of-mass` | `task03/05-hidden-center-of-mass` (GPU) | Identify each box's hidden center-of-mass quadrant | RGB tilt estimate |
+| `task06-method-agnostic` | `task06/method-agnostic` (GPU) | Estimate shape and pose from RGB-D with any method | RGB-D fusion reference estimator |
 
 ## Adapter Features
 
 - Fetches an exact source commit, or reads a clean checkout at that commit.
   Asset generation runs in an owned temporary snapshot; the supplied checkout is
   never used as a staging directory.
-- Copies instructions, oracle payloads, verifier code and Dockerfiles verbatim.
+- Copies instructions, oracle payloads and verifier code verbatim.
   A per-task SHA-256 manifest records the copied files.
-- Removes only the two local prebuilt-image references from each `task.toml`.
-  Harbor builds the supplied agent and verifier Dockerfiles instead.
+- Removes local prebuilt-image references so Harbor builds from the task context.
+  Task03 packages the pinned simulator and native task recipe as Docker stages.
 - Preserves upstream verifier Dockerfile `COPY` paths by bundling the necessary
   repository-root files inside the task's `tests/` build context.
-- Preserves separate verification, original artifact paths, CPU limits, memory,
-  timeouts, image dimensions, episode counts and `reward.json` metrics.
+- Preserves native verifier permissions and environment mode, artifact paths,
+  resource limits, timeouts, image dimensions, episode counts and reward metrics.
 - Uses standard Harbor agents; no new agent implementation is introduced.
-- Rejects GPU selectors and protects non-generated output directories.
+- Uses `--split gpu` to select the GPU catalog and protects non-generated output
+  directories.
 
 ## Generated Task Structure
 
@@ -73,11 +78,11 @@ datasets/rle-bench-cpu/
             └── test.sh
 ```
 
-Task07 already has a self-contained verifier build context and retains its native
-`tests/` layout. The other four tasks use the nested layout above. Private verifier
-files stay outside `environment/`. The package's `task-template/` contains the
-representative native task08 layout for adapter tooling; each exported task uses
-its own pinned upstream files and generated assets.
+Task07 retains its native separate verifier layout. Task03 runs the native
+root-owned simulator and verifier in the same container as the unprivileged
+agent, with the original private directories and control socket permissions.
+The other tasks use the nested separate verifier context above. The package's
+`task-template/` contains the native task08 layout for adapter tooling.
 
 ## Run Evaluation / Harness
 
@@ -97,8 +102,18 @@ uv run harbor run -p datasets/rle-bench-cpu -a oracle -n 5 \
 ```
 
 Oracle execution needs no model API key. The media switch disables informational
-recordings; sensor observations and scoring remain unchanged. Each task writes
-`verifier/reward.json` and the detailed `verifier/report.json`.
+recordings. Each task writes `verifier/reward.json`. Task03 also writes
+`verifier/diagnosis.json`, and the other tasks write `verifier/report.json`.
+
+Run the GPU split on one NVIDIA GPU with the original Compose passthrough. Use
+`-n 1` to run serially on one card. `--override-gpus 0` lets the task's Compose
+file handle device attachment in Harbor 0.21.0.
+
+```bash
+uv run rle-bench --split gpu --output-dir datasets/rle-bench-gpu
+RLEBENCH_GPU=0 uv run harbor run -p datasets/rle-bench-gpu -a oracle -n 1 \
+  --override-gpus 0 --ve RLEBENCH_MEDIA=0 --max-retries 0 --yes
+```
 
 For model agents, provide credentials and match upstream's provider configuration.
 For example, the native default Codex API lane uses `OPENAI_API_KEY` and these
@@ -135,17 +150,22 @@ uv run rle-bench --output-dir datasets/rle-bench-cpu
 uv run rle-bench --source-dir /path/to/RLE-Bench \
   --output-dir datasets/rle-bench-cpu
 
-# Select individual tasks, limit the selection, or regenerate owned task folders:
+# Generate only RGB-only perception and GELLO co-design:
+uv run rle-bench --task-ids task06/rgb-only task09 \
+  --output-dir datasets/rle-bench-priority-cpu
+uv run harbor run -p datasets/rle-bench-priority-cpu -a oracle -n 2 \
+  --ve RLEBENCH_MEDIA=0 --yes
+
+# List available tasks or regenerate owned task folders:
 uv run rle-bench --list
-uv run rle-bench --task-ids task06/rgb-only task09 --limit 1 \
-  --output-dir datasets/small
 uv run rle-bench --overwrite --output-dir datasets/rle-bench-cpu
 ```
 
-Native selectors and exported task IDs are accepted. Selection order is stable.
+Native selectors and exported task IDs are accepted. `--limit N` keeps the first
+N tasks in the stable selection order.
 `--overwrite` replaces only selected, provenance-marked tasks and preserves
 unrelated files at the output root. Dataset manifests include all existing owned
-CPU tasks in that output directory, with Harbor's content digests.
+tasks for their split, with Harbor's content digests.
 
 ## Comparison with Original Benchmark (Parity)
 
@@ -155,7 +175,7 @@ sample SEM from a single run. Organizer coordination reported by the contributor
 on 2026-11-16 permits upstream baseline/reference oracles without requiring full
 reward. The acceptance criterion is preservation of the original measurement.
 
-All five tasks passed the agreed equivalence criterion. Single observations are
+All five CPU tasks passed the agreed equivalence criterion. Single observations are
 shown below; sample SEM is undefined for `n=1`. The complete comparison is in
 [oracle_equivalence.json](oracle_equivalence.json).
 
@@ -176,6 +196,18 @@ Raw verifier rewards (task06 includes its original real-time deduction):
 | task07 | 0.0572 | — | 0.0572; deterministic metrics matched |
 | task08 | 0.7564 | — | 0.7564; full report matched |
 | task09 | 0.7154333333333334 | — | 0.7154333333333334; full report matched |
+
+The upstream task09 manifest records the exact full-battery Oracle scores. The
+native and adapted runs both match the total and all three variant scores.
+Task06 supplies a reference estimator for each CPU modality and pose-error and
+tracking regressions. Its final reward includes measured CPU inference time.
+Task07 ships a public depth policy. Its `BASELINE_REF_SCORE` is a development
+calibration over two direct-policy episodes. The benchmark runs the policy in a
+sandbox over eight scored episodes and uses a separate two-run determinism probe.
+Task08 ships a reference chassis and shelf controller. Its chassis-only golden
+test requires reward at least 0.64. The full Oracle also evaluates shelf targets
+for all three arms. The recorded full-run results above use the original verifier
+on both sides.
 
 Reproduce the original side in a separate checkout after `make install`. From this
 adapter directory, `bash scripts/prepare_native_cpu.sh /path/to/RLE-Bench` prepares
@@ -204,16 +236,50 @@ compares accuracy and all other deterministic metrics exactly, then independentl
 checks the original inference-time deduction and raw reward arithmetic. It never
 overrides or normalizes a verifier reward.
 
+### GPU split Oracle results
+
+On one RTX 3080 Ti, the upstream Oracle was run twice per task and compared with
+one adapted run. Task03 reward JSON matched exactly, including trial counts,
+interaction steps and zero infrastructure failures. Both environments passed the
+upstream agent-isolation check. The hidden-CoM Oracle answers were also checked
+against the official scene ground truth.
+
+| Native selector | Metric | Original observation | Harbor observation |
+| --- | --- | ---: | ---: |
+| `task03/01-tower-max-height` | Reward | 0.26419826409000635 | 0.26419826409000635 |
+| `task03/05-hidden-center-of-mass` | Reward | 1.0 (3/3) | 1.0 (3/3) |
+| `task06/method-agnostic` | Accuracy reward | 0.292222651588023 | 0.292222651588023 |
+
+The `method-agnostic` task reserves a GPU for agent use. Its upstream reference
+estimator runs on the CPU verifier. All deterministic metrics matched across both
+native runs and the Harbor run. The second native run took 557.43 s for inference
+across 700 frames and scored 0.0979 after the native timing deduction. The Harbor
+run took 551.63 s and scored 0.0982. Both deductions were checked against the same
+upstream formula.
+
+Run the native side from the pinned upstream checkout after building its images.
+
+```bash
+RLEBENCH_MEDIA=0 rlebench run task03/01-tower-max-height \
+  task03/05-hidden-center-of-mass task06/method-agnostic \
+  -a oracle --device cuda:0 -o /path/to/original-gpu-jobs \
+  -- --ve RLEBENCH_MEDIA=0 --max-retries 0
+```
+
+Use `rle-bench-compare --split gpu` with the original and Harbor job roots.
+`--task-ids` restricts comparison to specified tasks. Task03 comparison requires
+the upstream ledger and handoff checks to pass before comparing scores.
+
 No upstream fork is required: both sides use the original Harbor-compatible
 oracles. Adapter submission: [harbor-index/adapters#15](https://github.com/harbor-index/adapters/pull/15)
 (draft). Registry and experiment publication remain pending.
 
 ## Notes & Caveats
 
-- Scope is the five CPU tasks listed above. Task01–05 and task06's
-  `rgb-depth-model-training` and `method-agnostic` variants are excluded.
-  GPU testing remains work in progress; no GPU execution or passing GPU result
-  is claimed by this CPU adapter.
+- The native `task06/rgb-depth-model-training` Oracle ran on CUDA and produced
+  valid submissions twice. Both runs used the same Oracle import-path override,
+  seed and 54 epochs. Model weights and accuracy rewards differed, so this variant
+  remains outside the exported split pending a reproducible native baseline.
 - These oracles are reference implementations and baselines, not optimal answers.
   Low valid rewards are preserved. In the native run, task08's base passes the
   dynamics battery but its controller misses some shelf targets; task06's moving,
@@ -225,9 +291,9 @@ oracles. Adapter submission: [harbor-index/adapters#15](https://github.com/harbo
   accounting checked separately.
 - Harbor 0.21.0 and the source commit are pinned. Later Harbor/RLE-Bench upgrades
   can change networking, sandbox behavior and GPU handling and require new checks.
-- Dockerfiles retain the original `python:3.12-slim` base declaration and exact
-  numerical package pins. Record actual image digests for long-term reproduction;
-  the base tag and transitive dependencies can change across builds.
+- Dockerfiles retain upstream base tags and numerical package pins. Record image
+  digests for long-term reproduction because base tags and transitive dependencies
+  can change across builds.
 - No benchmark instructions, scoring formulas, hidden seeds, budgets or oracle
   algorithms have been patched. The local prebuilt image references are removed
   only to enable builds from the exported directories.
@@ -239,8 +305,8 @@ oracles. Adapter submission: [harbor-index/adapters#15](https://github.com/harbo
 ## Installation / Prerequisites
 
 - Linux, Git, Python 3.12, uv and a running Docker daemon with Compose support.
-- Internet access for the initial source/dependency/image downloads. No NVIDIA
-  runtime or GPU is needed for these five tasks.
+- Internet access for the initial source, dependency and image downloads. The GPU
+  split requires an NVIDIA GPU, working host drivers and NVIDIA Container Toolkit.
 - Per task, native CPU environments request four CPUs and 4–6 GiB RAM. Running
   five tasks concurrently needs resources for their combined containers.
 - Install with `uv sync --locked --group dev`; the lock includes Harbor 0.21.0
