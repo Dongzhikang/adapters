@@ -10,7 +10,9 @@
     "number_of_runs": 1,
     "notes": "Oracle equivalence only, not statistical LLM-agent parity. One complete native/adapted run per task; sample SEM is undefined, never estimated as zero. All five CPU tasks pass exact comparison of complete reports excluding only measured wall-clock diagnostics. Fixed source c6bf572283b5453c0ee76eaa3054f23d691e433d; Harbor 0.21.0; original CPU/memory/time budgets, hidden seeds and scoring. RLEBENCH_MEDIA=0 on both sides. Native baselines accepted per organizer coordination reported by user on 2026-11-16. Task06 deterministic accuracy is exact; original measured timing penalty and raw reward are checked separately. Task07 runs all eight hidden episodes; task08 and task09 reports match in full. No model API calls, original-benchmark fork, dataset registry publication or experiment uploads. GPU testing is work in progress; this contribution includes CPU results only.",
     "original_parity_repo": "https://github.com/RLE-Bench/RLE-Bench",
-    "adapter_pr": null,
+    "adapter_pr": [
+      "https://github.com/harbor-index/adapters/pull/15"
+    ],
     "dataset_pr": null,
     "parity_pr": null,
     "metrics": [

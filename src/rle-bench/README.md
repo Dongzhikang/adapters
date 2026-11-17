@@ -205,8 +205,8 @@ checks the original inference-time deduction and raw reward arithmetic. It never
 overrides or normalizes a verifier reward.
 
 No upstream fork is required: both sides use the original Harbor-compatible
-oracles. Registry, adapter and experiment publication links will be populated
-after the corresponding submissions exist.
+oracles. Adapter submission: [harbor-index/adapters#15](https://github.com/harbor-index/adapters/pull/15)
+(draft). Registry and experiment publication remain pending.
 
 ## Notes & Caveats
 
