@@ -115,3 +115,31 @@ def test_task03_requires_completed_ledger_and_handoff(tmp_path):
     (verifier / "diagnosis.json").write_text(json.dumps(diagnosis))
     with pytest.raises(ValueError, match="Incomplete or invalid task03 verification"):
         load_trials(tmp_path, specs)
+
+
+def test_task02_checks_intermediate_handoffs_even_when_the_final_reward_matches(tmp_path):
+    names = ["develop", *(f"eval_{i:02d}" for i in range(1, 6))]
+    result = {"trial_name": "table", "task_name": "rlebench/task02-L1-06-setting-the-table",
+              "step_results": []}
+    for index, name in enumerate(names):
+        verifier = tmp_path / "steps" / name / "verifier"
+        verifier.mkdir(parents=True)
+        rewards = {"reward": 0.0, "trials_total": 5, "trials_recorded": index,
+                   "trials_attempted": index, "infrastructure_failures": 0}
+        diagnosis = {"phase": "finished" if index == 5 else "evaluation",
+                     "ledger_ok": True, "handoff_ok": True, "infrastructure_failures": 0}
+        (verifier / "reward.json").write_text(json.dumps(rewards))
+        (verifier / "diagnosis.json").write_text(json.dumps(diagnosis))
+        result["step_results"].append({"step_name": name, "verifier_result": {"rewards": rewards}})
+    result["verifier_result"] = result["step_results"][-1]["verifier_result"]
+    (tmp_path / "result.json").write_text(json.dumps(result))
+    specs = select_tasks(["task02/06-setting-the-table"], None, split="gpu")
+    report, _ = load_trials(tmp_path, specs)[specs[0].task_id]
+    assert list(report["steps"]) == names
+    assert report["steps"]["eval_03"]["trials_recorded"] == 3
+    path = tmp_path / "steps/eval_03/verifier/diagnosis.json"
+    diagnosis = json.loads(path.read_text())
+    diagnosis["error"] = "verification or handoff unavailable"
+    path.write_text(json.dumps(diagnosis))
+    with pytest.raises(ValueError, match="Incomplete or invalid task02 verification.*eval_03"):
+        load_trials(tmp_path, specs)

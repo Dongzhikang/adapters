@@ -94,7 +94,7 @@
     "model": "None",
     "date": "2026-11-17",
     "kind": "oracle_equivalence",
-    "adapted_benchmark_size": 4,
+    "adapted_benchmark_size": 19,
     "parity_benchmark_size": 4,
     "notes": "Oracle validation on a single RTX 3080 Ti using two complete native runs and one Harbor run per task. Task03 matched full reward JSON and passed the original ledger, handoff and isolation checks. Task06 method-agnostic matched deterministic metrics and preserved raw timing deductions. The training Oracle used deterministic CUDA settings on both sides and matched all 38 model state tensors and deterministic verifier fields. With one verifier running at a time, the native model replay and the adapted training run both scored 0.0041. Harbor sample SEM is undefined. Full evaluation artifacts and dataset registration are pending publication.",
     "original_parity_repo": "https://github.com/RLE-Bench/RLE-Bench",

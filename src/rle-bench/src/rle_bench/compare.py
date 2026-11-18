@@ -18,6 +18,8 @@ _PACKAGE_NAMES = {
     "rlebench/task08-mobile-manipulator-from-scratch": "task08",
     "rlebench/task09-gello-codesign-multirobot": "task09",
 }
+_TASK02_TRIALS = 5
+_TASK02_STEPS = ("develop", *(f"eval_{i:02d}" for i in range(1, _TASK02_TRIALS + 1)))
 
 
 def _without_fields(value, excluded: frozenset[str]):
@@ -109,17 +111,54 @@ def compare_reports(task_id: str, original: dict, adapted: dict) -> dict:
     return result
 
 
-def _task03_report(verifier: Path, rewards: dict) -> dict:
+def _robocasa_report(verifier: Path, rewards: dict, family: str, *,
+                     step_index: int | None = None) -> dict:
     score = json.loads((verifier / "reward.json").read_text())
     diagnosis = json.loads((verifier / "diagnosis.json").read_text())
     trials = score.get("trials_total", 0)
-    if (score != rewards or diagnosis.get("phase") != "finished"
+    recorded = trials
+    phase = "finished"
+    if step_index is not None:
+        if trials != _TASK02_TRIALS:
+            raise ValueError(f"Expected {_TASK02_TRIALS} Task02 trials: {verifier}")
+        recorded = step_index
+        if recorded < trials:
+            phase = "evaluation"
+    attempted = score.get("trials_attempted", -1)
+    valid_attempts = attempted == trials if family == "task03" else 0 <= attempted <= recorded
+    if (score != rewards or diagnosis.get("phase") != phase or diagnosis.get("error")
             or diagnosis.get("ledger_ok") is not True or diagnosis.get("handoff_ok") is not True
             or diagnosis.get("infrastructure_failures") != 0 or diagnosis.get("failures")
             or score.get("infrastructure_failures") != 0 or trials <= 0
-            or trials != score.get("trials_recorded") or trials != score.get("trials_attempted")):
-        raise ValueError(f"Incomplete or invalid task03 verification: {verifier}")
+            or recorded != score.get("trials_recorded") or not valid_attempts):
+        raise ValueError(f"Incomplete or invalid {family} verification: {verifier}")
     return {**score, "diagnosis": diagnosis}
+
+
+def _check_oracle_exit(work: Path) -> None:
+    exit_code = work / "agent/exit-code.txt"
+    if exit_code.is_file() and exit_code.read_text().strip() != "0":
+        raise ValueError(f"Unsuccessful Oracle execution: {exit_code}")
+
+
+def _task02_report(path: Path, trial: dict, rewards: dict) -> dict:
+    steps = trial.get("step_results") or []
+    if tuple(step.get("step_name") for step in steps) != _TASK02_STEPS:
+        raise ValueError(f"Unexpected Task02 step sequence: {path}")
+    reports = {}
+    for index, step in enumerate(steps):
+        name = step["step_name"]
+        work = path.parent / "steps" / name
+        result = step.get("verifier_result")
+        if step.get("exception_info") or not result:
+            raise ValueError(f"Unsuccessful Task02 {name} step: {path}")
+        _check_oracle_exit(work)
+        reports[name] = _robocasa_report(work / "verifier", result["rewards"], "task02",
+                                         step_index=index)
+    final = _TASK02_STEPS[-1]
+    if steps[-1]["verifier_result"]["rewards"] != rewards:
+        raise ValueError(f"Task02 aggregate differs from {final}: {path}")
+    return {**reports[final], "steps": reports}
 
 
 def load_trials(root: Path, specs: tuple[TaskSpec, ...] = TASKS) -> dict[str, tuple[dict, Path]]:
@@ -128,8 +167,8 @@ def load_trials(root: Path, specs: tuple[TaskSpec, ...] = TASKS) -> dict[str, tu
     for spec in specs:
         slug = Path(spec.upstream_path).name
         aliases.update({spec.task_id: spec.task_id, slug: spec.task_id})
-        if spec.family == "task03":
-            aliases[f"rlebench/task03-l1-{slug}"] = spec.task_id
+        if spec.family in {"task02", "task03"}:
+            aliases[f"rlebench/{spec.family}-l1-{slug}"] = spec.task_id
         elif spec.family == "task06":
             aliases[f"rlebench/{spec.task_id}"] = spec.task_id
     trials = {}
@@ -144,13 +183,16 @@ def load_trials(root: Path, specs: tuple[TaskSpec, ...] = TASKS) -> dict[str, tu
             raise ValueError(f"More than one trial for {task_id}; select a single run directory")
         if trial.get("exception_info") or not trial.get("verifier_result"):
             raise ValueError(f"Unsuccessful Harbor trial: {path}")
-        exit_code = path.parent / "agent/exit-code.txt"
-        if exit_code.is_file() and exit_code.read_text().strip() != "0":
-            raise ValueError(f"Unsuccessful Oracle execution: {exit_code}")
-        verifier = path.parent / "verifier"
         rewards = trial["verifier_result"]["rewards"]
-        if task_id.startswith("task03-"):
-            report = _task03_report(verifier, rewards)
+        family = task_id.split("-", 1)[0]
+        if family == "task02":
+            trials[task_id] = (_task02_report(path, trial, rewards), path)
+            continue
+        work = path.parent
+        _check_oracle_exit(work)
+        verifier = work / "verifier"
+        if family == "task03":
+            report = _robocasa_report(verifier, rewards, family)
         else:
             report = json.loads((verifier / "report.json").read_text())
             if report["reward"] != rewards["reward"]:

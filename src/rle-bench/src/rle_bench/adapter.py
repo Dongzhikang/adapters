@@ -45,12 +45,33 @@ TASKS = (
     TaskSpec("task08", "task08"),
     TaskSpec("task09", "task09"),
 )
+_TASK02_GROUPS = (
+    "01-washing-dishes",
+    "02-sauteing-vegetables",
+    "03-baking",
+    "04-reheating-food",
+    "05-chopping-food",
+    "06-setting-the-table",
+    "07-portioning-meals",
+    "08-defrosting-food",
+    "09-arranging-buffet",
+    "10-serving-beverages",
+    "11-loading-fridge",
+    "12-managing-freezer-space",
+    "13-clearing-table",
+    "14-microwaving-food",
+    "15-storing-leftovers",
+)
+TASK02_TASKS = tuple(
+    TaskSpec(f"task02-{group}", f"task02/{group}", gpu=True)
+    for group in _TASK02_GROUPS
+)
 GPU_TASKS = (
     TaskSpec("task03-01-tower-max-height", "task03/01-tower-max-height", gpu=True),
     TaskSpec("task03-05-hidden-center-of-mass", "task03/05-hidden-center-of-mass", gpu=True),
     TaskSpec("task06-method-agnostic", "task06/method-agnostic", gpu=True),
     TaskSpec("task06-rgb-depth-model-training", _MODEL_TRAINING, gpu=True),
-)
+) + TASK02_TASKS
 _SHARED_FILES = ("__init__.py", "core/__init__.py", "core/model.py",
                  "core/scoring.py", "core/media.py")
 
@@ -125,16 +146,20 @@ def _copy_tree(source: Path, destination: Path) -> None:
     shutil.copytree(source, destination, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
 
 
-def _bundle_task03_environment(source: Path, native: Path, destination: Path) -> None:
+def _pins(path: Path) -> dict[str, str]:
+    return dict(line.split("=", 1) for line in path.read_text().splitlines()
+                if line and not line.startswith("#"))
+
+
+def _bundle_robocasa_environment(source: Path, native: Path, context: Path,
+                                destination: Path) -> None:
     """Link the two upstream recipes as local Docker stages."""
-    family = native.parent
-    context = "image-hidden-com" if native.name == "05-hidden-center-of-mass" else "image"
-    _copy_tree(family / context, destination)
-    shutil.copy2(native / "environment/docker-compose.yaml", destination)
+    _copy_tree(context, destination)
+    compose = destination / "docker-compose.yaml"
+    shutil.copy2(native / "environment/docker-compose.yaml", compose)
     simulator = source / "sim/robocasa"
     base = (simulator / "base/Dockerfile").read_text()
-    pins = dict(line.split("=", 1) for line in (simulator / "pins.env").read_text().splitlines()
-                if line and not line.startswith("#"))
+    pins = _pins(simulator / "pins.env")
     base = base.replace("\nFROM python:3.11-slim\n", "\nFROM python:3.11-slim AS sim-base\n", 1)
     for key in ("ROBOSUITE_SHA", "ROBOCASA_SHA", "ROBOCASA_ASSET_VERSION"):
         base = base.replace(f"\nARG {key}\n", f"\nARG {key}={pins[key]}\n", 1)
@@ -145,7 +170,7 @@ def _bundle_task03_environment(source: Path, native: Path, destination: Path) ->
     task = task.replace("FROM ${SIM_IMAGE} AS agent-base", "FROM sim-base AS agent-base", 1)
     task = task.replace("FROM ${MODELS} AS final", "FROM models-off AS final", 1)
     if "FROM sim-base AS agent-base" not in task or "AS sim-base" not in base:
-        raise ValueError("Task03 upstream Docker build layout changed")
+        raise ValueError("Upstream RoboCasa Docker build layout changed")
     dockerfile.write_text(base.rstrip() + "\n\n" + task)
 
 
@@ -179,14 +204,20 @@ def export_task(source: Path, spec: TaskSpec, destination: Path) -> None:
     for name in ("instruction.md", "README.md"):
         if (native / name).exists():
             shutil.copy2(native / name, destination / name)
-    if spec.family == "task03":
-        _bundle_task03_environment(source, native, destination / "environment")
+    if spec.family == "task02":
+        _bundle_robocasa_environment(source, native, native.parent / "image", destination / "environment")
+    elif spec.family == "task03":
+        context = "image-hidden-com" if native.name == "05-hidden-center-of-mass" else "image"
+        _bundle_robocasa_environment(source, native, native.parent / context, destination / "environment")
     else:
         _copy_tree(native / "environment", destination / "environment")
-    _copy_tree(native / "solution", destination / "solution")
+    if spec.family == "task02":
+        _copy_tree(native / "steps", destination / "steps")
+    else:
+        _copy_tree(native / "solution", destination / "solution")
 
     tests = destination / "tests"
-    if spec.family in {"task03", "task07"}:
+    if spec.family in {"task02", "task03", "task07"}:
         _copy_tree(native / "tests", tests)
     else:
         # Preserve repository-root COPY paths, so upstream Dockerfiles stay verbatim.
@@ -212,7 +243,7 @@ def export_task(source: Path, spec: TaskSpec, destination: Path) -> None:
         changes[0] = "Remove local prebuilt image references"
         changes.extend(["Set the public asset path in the Oracle process for the reference import",
                         "Run the unmodified training function with deterministic CUDA algorithms"])
-    if spec.family == "task03":
+    if spec.family in {"task02", "task03"}:
         name = original["task"]["name"]
         authors = [{"name": "Haitong Ma", "email": "haitongma@g.harvard.edu"}]
         config = config.replace(f'name = "{name}"\n',
@@ -222,6 +253,8 @@ def export_task(source: Path, spec: TaskSpec, destination: Path) -> None:
         changes = ["Bundle original simulator and agent build recipes as local Docker stages",
                    "Remove local image reference; normalize registry name and credit upstream authors",
                    "Keep the native root-only verifier, ledger and collect hook in the shared environment"]
+        if spec.family == "task02":
+            changes.append("Preserve the read-only RoboCasa asset mount, skill handoff and six native steps")
     (destination / "task.toml").write_text(config)
     parsed = tomllib.loads(config)
     for section in (original["environment"], original["verifier"].get("environment", {})):
@@ -230,7 +263,7 @@ def export_task(source: Path, spec: TaskSpec, destination: Path) -> None:
         raise ValueError(f"Unexpected task configuration changes: {spec.task_id}")
 
     files = {}
-    for root in ("environment", "solution", "tests"):
+    for root in ("environment", "solution", "tests", "steps"):
         for path in sorted((destination / root).rglob("*")):
             if path.is_file():
                 files[path.relative_to(destination).as_posix()] = sha256(path)
@@ -279,7 +312,10 @@ class RLEBenchAdapter:
         with tempfile.TemporaryDirectory(prefix="rle-bench-source-") as temporary:
             source = _snapshot(Path(temporary), self.source_dir)
             for family in dict.fromkeys(task.family for task in self.tasks):
-                if family == "task03":
+                if family == "task02":
+                    subprocess.run([sys.executable, "tasks/task02/build_groups.py", "--emit-all"],
+                                   cwd=source, check=True)
+                elif family == "task03":
                     for spec in self.tasks:
                         if spec.family == family:
                             subprocess.run([sys.executable, "tasks/task03/build_levels.py",

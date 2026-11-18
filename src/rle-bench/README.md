@@ -28,6 +28,7 @@ nine-family, 51-task upstream matrix.
 | `task07` | `task07` | Clear a bin with a magnet-tipped Panda | Public depth baseline policy |
 | `task08` | `task08` | Design a common mobile base and shelf controller | Reference chassis and controller |
 | `task09` | `task09` | Co-design three GELLO lead arms and compensation | Three pinned hardware/software submissions |
+| `task02-<group>` | `task02/<group>` (GPU) | Develop reusable robot skills on three training tasks and transfer them to five held-out trials in each of 15 groups | Upstream protocol smoke Oracle |
 | `task03-01-tower-max-height` | `task03/01-tower-max-height` (GPU) | Build the tallest stable tower | Replay of upstream recorded controls |
 | `task03-05-hidden-center-of-mass` | `task03/05-hidden-center-of-mass` (GPU) | Identify each box's hidden center-of-mass quadrant | RGB tilt estimate |
 | `task06-method-agnostic` | `task06/method-agnostic` (GPU) | Estimate shape and pose from RGB-D with any method | RGB-D fusion reference estimator |
@@ -43,7 +44,7 @@ nine-family, 51-task upstream matrix.
 - Runs the task06 training Oracle through a launcher that enables deterministic
   CUDA operations and calls the upstream trainer.
 - Removes local prebuilt-image references so Harbor builds from the task context.
-  Task03 packages the pinned simulator and native task recipe as Docker stages.
+  Task02 and Task03 package the pinned simulator and task recipe as Docker stages.
 - Preserves upstream verifier Dockerfile `COPY` paths by bundling the necessary
   repository-root files inside the task's `tests/` build context.
 - Preserves native verifier permissions and environment mode, artifact paths,
@@ -81,9 +82,13 @@ datasets/rle-bench-cpu/
             └── test.sh
 ```
 
-Task07 retains its native separate verifier layout. Task03 runs the native
-root-owned simulator and verifier in the same container as the unprivileged
-agent, with the original private directories and control socket permissions.
+Task07 retains its native separate verifier layout. Task02 and Task03 run the
+native root-owned simulator and verifier in the same container as the
+unprivileged agent, with the original private directories and control socket
+permissions. Task02 keeps the
+`develop` and five `eval_01`–`eval_05` steps, with their collect hooks and final-step reward.
+The hooks freeze `/workspace/agent_harness` after development and restore the
+same files for each evaluation agent.
 The other tasks use the nested separate verifier context above. The package's
 `task-template/` contains the native task08 layout for adapter tooling.
 
@@ -105,12 +110,28 @@ uv run harbor run -p datasets/rle-bench-cpu -a oracle -n 5 \
 ```
 
 Oracle execution needs no model API key. The media switch disables informational
-recordings. Each task writes `verifier/reward.json`. Task03 also writes
-`verifier/diagnosis.json`, and the other tasks write `verifier/report.json`.
+recordings. Each task writes `verifier/reward.json`. Task02 and Task03 also write
+`verifier/diagnosis.json`. Task02 places both files under the respective
+`steps/<step-name>/` directory.
+The remaining tasks write a detailed `verifier/report.json`.
 
 Run the GPU split on one NVIDIA GPU with the original Compose passthrough. Use
 `-n 1` to run serially on one card. `--override-gpus 0` lets the task's Compose
 file handle device attachment in Harbor 0.21.0.
+
+### Task02 RoboCasa assets
+
+Prepare the pinned RoboCasa assets in the upstream checkout for Task02.
+
+```bash
+upstream=/path/to/pinned/RLE-Bench
+(cd "$upstream" && make sim-robocasa)
+export ROBOCASA_ASSET_DIR="$upstream/third_party/robocasa/robocasa/models/assets"
+```
+
+Compose mounts the RoboCasa assets read-only.
+
+### Run the GPU split
 
 ```bash
 uv run rle-bench --split gpu --output-dir datasets/rle-bench-gpu
@@ -248,10 +269,10 @@ overrides or normalizes a verifier reward.
 
 ### GPU split Oracle results
 
-On one RTX 3080 Ti, each Oracle was run twice with the upstream images and
-once with the adapter. The training variant used deterministic CUDA settings on
-both sides. Task03 reward JSON matched exactly, including trial counts,
-interaction steps and zero infrastructure failures. Both environments passed the
+On one RTX 3080 Ti, each of the four task03 and task06 Oracles below was run twice
+with the upstream images and once with the adapter. The training variant used
+deterministic CUDA settings on both sides. Task03 reward JSON matched exactly,
+including trial counts, interaction steps and zero infrastructure failures. Both environments passed the
 upstream agent-isolation check. The hidden-CoM Oracle answers were also checked
 against the official scene ground truth.
 
@@ -302,12 +323,46 @@ uv run harbor run -p "$scratch/$training_task" -a oracle -n 1 --override-gpus 0 
 Use `rle-bench-compare --split gpu` with the original and Harbor job roots.
 `--task-ids` restricts comparison to specified tasks. Task03 comparison requires
 the upstream ledger and handoff checks to pass before comparing scores.
+Task02 comparison requires all six step verifiers to succeed, compares their
+cumulative reward and diagnosis files exactly, and checks that the Harbor
+aggregate equals the final step's reward.
 For the training task, select one native run with the matching deterministic CUDA
 settings as the original side.
 
-Both sides use the pinned upstream Oracle algorithms and verifier.
+### Task02 kitchen skill transfer
+
+Use the RoboCasa asset path above. Run the upstream and adapted protocol Oracles,
+then compare the six step results for each group.
+
+```bash
+(cd "$upstream" && make task02)
+uv run rle-bench --split gpu --output-dir datasets/rle-bench-task02 --task-ids \
+  $(uv run rle-bench --split gpu --list | awk '$1 ~ /^task02-/ {print $1}')
+RLEBENCH_GPU=0 RLEBENCH_MEDIA=0 uv run harbor run -p "$upstream/tasks/task02" -a oracle \
+  -n 1 --override-gpus 0 --max-retries 0 --yes -o jobs/task02-native
+RLEBENCH_GPU=0 RLEBENCH_MEDIA=0 uv run harbor run -p datasets/rle-bench-task02 -a oracle \
+  -n 1 --override-gpus 0 --max-retries 0 --yes -o jobs/task02-harbor
+uv run rle-bench-compare --split gpu --original-jobs jobs/task02-native \
+  --harbor-jobs jobs/task02-harbor \
+  --task-ids $(uv run rle-bench --split gpu --list | awk '$1 ~ /^task02-/ {print $1}')
+```
+
+All 15 Task02 groups matched on an RTX 3080 Ti. The native and adapted runs
+produced identical reward and diagnosis files for all 90 paired steps, with zero
+infrastructure failures. The Oracle resets and takes one neutral action during
+development, then ends each of the five evaluation trials without acting. Its zero
+reward is expected. Model-agent scores are available on the
+[upstream leaderboard](https://rle-bench.github.io/).
+
+An additional scripted comparison covered washing dishes, setting the table and
+storing leftovers. All five rounds in each group received the original frozen
+manual and nested skill file. Edits from earlier rounds were discarded. Each
+round returned three RGB and three depth views and recorded a neutral action on
+both sides. This verifies the handoff and simulator interface for those groups.
+
+Both sides use the pinned upstream verifier.
 [Draft PR #15](https://github.com/harbor-index/adapters/pull/15) covers five CPU
-tasks and four GPU tasks. Registry and full experiment artifact publication
+tasks and 19 GPU tasks. Registry and full experiment artifact publication
 remain pending.
 
 ## Notes & Caveats
