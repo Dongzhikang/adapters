@@ -17,7 +17,7 @@
       },
       {
         "split": "gpu",
-        "size": 3,
+        "size": 4,
         "harness": "agent",
         "supported_agents": ["oracle@harbor-0.21.0"],
         "adaptable": true,
@@ -45,15 +45,15 @@
       },
       {
         "split": "gpu",
-        "adapted_benchmark_size": 3,
-        "parity_benchmark_size": 3,
+        "adapted_benchmark_size": 4,
+        "parity_benchmark_size": 4,
         "parity_sampling_rate": 1.0,
         "registry_benchmark_size": 0,
         "added_agents": ["None"],
         "parity_matching_agents": ["oracle@harbor-0.21.0"],
         "parity_unmatching_agents": ["None"],
         "parity_costs": "$0",
-        "notes": "Two native runs and one adapted run per task on an RTX 3080 Ti. Both task03 tasks matched the complete reward JSON and passed the upstream ledger, handoff and isolation checks. Task06 method-agnostic matched all deterministic metrics and retained the original timing deduction. Oracle equivalence only; registry publication pending."
+        "notes": "Two native runs and one adapted run per task on an RTX 3080 Ti. Both task03 tasks matched the complete reward JSON and passed upstream ledger, handoff and isolation checks. Both task06 variants matched all deterministic metrics with the original timing deduction. Model training also matched model state with deterministic CUDA enabled on both sides. These runs establish Oracle equivalence. Registry publication is pending."
       }
     ]
   }

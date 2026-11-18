@@ -45,7 +45,8 @@ def test_selection_is_stable_and_rejects_gpu_tasks():
         adapter.select_tasks(None, 0)
 
 
-def test_export_keeps_private_verifier_outside_agent_build_context(tmp_path):
+@pytest.fixture
+def native_task06(tmp_path):
     source = tmp_path / "source"
     native = source / "tasks/task06/rgb-only"
     for name, value in {
@@ -67,6 +68,11 @@ def test_export_keeps_private_verifier_outside_agent_build_context(tmp_path):
         path = source / "rlebench" / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("# shared verifier code\n")
+    return source, native
+
+
+def test_export_keeps_private_verifier_outside_agent_build_context(tmp_path, native_task06):
+    source, native = native_task06
     output = tmp_path / "export"
     adapter.export_task(source, adapter.TASKS[0], output)
     assert (output / "instruction.md").read_bytes() == (native / "instruction.md").read_bytes()
@@ -78,6 +84,29 @@ def test_export_keeps_private_verifier_outside_agent_build_context(tmp_path):
     assert (output / "tests/rlebench/core/scoring.py").is_file()
     assert (output / "solution/payload/estimator.py").read_bytes() == (
         native / "solution/payload/estimator.py").read_bytes()
+
+
+def test_model_training_exports_deterministic_settings_only_for_the_oracle(tmp_path, native_task06):
+    source, original = native_task06
+    spec, = adapter.select_tasks(["task06/rgb-depth-model-training"], None, split="gpu")
+    native = original.rename(source / "tasks" / spec.upstream_path)
+    config = CONFIG.replace("task06-rgb-only", spec.task_id).replace("[environment]\n", "[environment]\ngpus = 1\n")
+    (native / "task.toml").write_text(config)
+    dockerfile = native / "tests/Dockerfile"
+    dockerfile.write_text(dockerfile.read_text().replace("task06/rgb-only", spec.upstream_path))
+    (native / "solution/solve.sh").write_text("#!/bin/bash\npython3 /solution/train_solution.py /logs/artifacts\n")
+    (native / "solution/train_solution.py").write_text("# upstream trainer\n")
+
+    output = tmp_path / "export"
+    adapter.export_task(source, spec, output)
+
+    expected = tomllib.loads(adapter.portable_config(config))
+    expected["solution"] = {"env": {"RLEBENCH_ASSETS": "/workspace", "CUBLAS_WORKSPACE_CONFIG": ":4096:8"}}
+    assert tomllib.loads((output / "task.toml").read_text()) == expected
+    assert "train_deterministic.py /logs/artifacts" in (output / "solution/solve.sh").read_text()
+    assert (output / "solution/train_deterministic.py").is_file()
+    assert (output / "solution/train_solution.py").read_bytes() == (native / "solution/train_solution.py").read_bytes()
+    assert (output / "tests/test.sh").read_bytes() == (native / "tests/test.sh").read_bytes()
 
 
 def test_output_checks_do_not_delete_unrelated_files(tmp_path):

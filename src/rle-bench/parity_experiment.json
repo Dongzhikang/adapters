@@ -94,9 +94,9 @@
     "model": "None",
     "date": "2026-11-17",
     "kind": "oracle_equivalence",
-    "adapted_benchmark_size": 3,
-    "parity_benchmark_size": 3,
-    "notes": "Oracle validation on a single RTX 3080 Ti using two complete native runs and one Harbor run per task. Task03 matched full reward JSON and passed the original ledger, handoff and isolation checks. Task06 matched all deterministic metrics. The second native run and Harbor run took 557.43 s and 551.63 s for inference across 700 frames, with raw rewards 0.0979 and 0.0982. The original timing formula matched both. Harbor sample SEM is undefined. Full job artifacts and dataset registration are pending publication.",
+    "adapted_benchmark_size": 4,
+    "parity_benchmark_size": 4,
+    "notes": "Oracle validation on a single RTX 3080 Ti using two complete native runs and one Harbor run per task. Task03 matched full reward JSON and passed the original ledger, handoff and isolation checks. Task06 method-agnostic matched deterministic metrics and preserved raw timing deductions. The training Oracle used deterministic CUDA settings on both sides and matched all 38 model state tensors and deterministic verifier fields. With one verifier running at a time, the native model replay and the adapted training run both scored 0.0041. Harbor sample SEM is undefined. Full evaluation artifacts and dataset registration are pending publication.",
     "original_parity_repo": "https://github.com/RLE-Bench/RLE-Bench",
     "adapter_pr": [
       "https://github.com/harbor-index/adapters/pull/15"
@@ -131,6 +131,16 @@
         "harbor": "0.292222651588023 (n=1)",
         "original_runs": [0.292222651588023, 0.292222651588023],
         "harbor_runs": [0.292222651588023],
+        "original_sample_sem": 0.0,
+        "harbor_sample_sem": null
+      },
+      {
+        "benchmark_name": "RLE-Bench GPU",
+        "metric": "task06-rgb-depth-model-training accuracy_reward (deterministic CUDA)",
+        "original": "0.0041042114936177525 (n=2)",
+        "harbor": "0.0041042114936177525 (n=1)",
+        "original_runs": [0.0041042114936177525, 0.0041042114936177525],
+        "harbor_runs": [0.0041042114936177525],
         "original_sample_sem": 0.0,
         "harbor_sample_sem": null
       }

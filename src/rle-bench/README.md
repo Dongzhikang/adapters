@@ -31,14 +31,17 @@ nine-family, 51-task upstream matrix.
 | `task03-01-tower-max-height` | `task03/01-tower-max-height` (GPU) | Build the tallest stable tower | Replay of upstream recorded controls |
 | `task03-05-hidden-center-of-mass` | `task03/05-hidden-center-of-mass` (GPU) | Identify each box's hidden center-of-mass quadrant | RGB tilt estimate |
 | `task06-method-agnostic` | `task06/method-agnostic` (GPU) | Estimate shape and pose from RGB-D with any method | RGB-D fusion reference estimator |
+| `task06-rgb-depth-model-training` | `task06/rgb-depth-model-training` (GPU) | Train a TorchScript RGB-D pose estimator from scratch | Upstream CNN trained with deterministic CUDA |
 
 ## Adapter Features
 
 - Fetches an exact source commit, or reads a clean checkout at that commit.
   Asset generation runs in an owned temporary snapshot; the supplied checkout is
   never used as a staging directory.
-- Copies instructions, oracle payloads and verifier code verbatim.
+- Copies instructions, reference training code and verifier code verbatim.
   A per-task SHA-256 manifest records the copied files.
+- Runs the task06 training Oracle through a launcher that enables deterministic
+  CUDA operations and calls the upstream trainer.
 - Removes local prebuilt-image references so Harbor builds from the task context.
   Task03 packages the pinned simulator and native task recipe as Docker stages.
 - Preserves upstream verifier Dockerfile `COPY` paths by bundling the necessary
@@ -114,6 +117,13 @@ uv run rle-bench --split gpu --output-dir datasets/rle-bench-gpu
 RLEBENCH_GPU=0 uv run harbor run -p datasets/rle-bench-gpu -a oracle -n 1 \
   --override-gpus 0 --ve RLEBENCH_MEDIA=0 --max-retries 0 --yes
 ```
+
+For `rgb-depth-model-training`, the generated task sets
+`CUBLAS_WORKSPACE_CONFIG=:4096:8` and `RLEBENCH_ASSETS=/workspace` under
+`[solution.env]`. Harbor applies both settings to the Oracle process. The first
+supports PyTorch deterministic operations, and the second lets the reference
+trainer import its public geometry helpers. The root renderer uses its original
+private asset path.
 
 For model agents, provide credentials and match upstream's provider configuration.
 For example, the native default Codex API lane uses `OPENAI_API_KEY` and these
@@ -238,8 +248,9 @@ overrides or normalizes a verifier reward.
 
 ### GPU split Oracle results
 
-On one RTX 3080 Ti, the upstream Oracle was run twice per task and compared with
-one adapted run. Task03 reward JSON matched exactly, including trial counts,
+On one RTX 3080 Ti, each Oracle was run twice with the upstream images and
+once with the adapter. The training variant used deterministic CUDA settings on
+both sides. Task03 reward JSON matched exactly, including trial counts,
 interaction steps and zero infrastructure failures. Both environments passed the
 upstream agent-isolation check. The hidden-CoM Oracle answers were also checked
 against the official scene ground truth.
@@ -249,6 +260,7 @@ against the official scene ground truth.
 | `task03/01-tower-max-height` | Reward | 0.26419826409000635 | 0.26419826409000635 |
 | `task03/05-hidden-center-of-mass` | Reward | 1.0 (3/3) | 1.0 (3/3) |
 | `task06/method-agnostic` | Accuracy reward | 0.292222651588023 | 0.292222651588023 |
+| `task06/rgb-depth-model-training` | Accuracy reward | 0.0041042114936177525 | 0.0041042114936177525 |
 
 The `method-agnostic` task reserves a GPU for agent use. Its upstream reference
 estimator runs on the CPU verifier. All deterministic metrics matched across both
@@ -257,7 +269,13 @@ across 700 frames and scored 0.0979 after the native timing deduction. The Harbo
 run took 551.63 s and scored 0.0982. Both deductions were checked against the same
 upstream formula.
 
-Run the native side from the pinned upstream checkout after building its images.
+The training task matched all 38 model state tensors and every deterministic
+verifier field across both native diagnostic runs and the adapted run. Using
+one verifier at a time, the original model replay and the adapted run took
+69.25 s and 69.74 s for 700 frames respectively. Both exceeded 10 Hz and scored
+0.0041 with zero time deduction.
+
+Run the first three tasks from the pinned upstream checkout after building its images.
 
 ```bash
 RLEBENCH_MEDIA=0 rlebench run task03/01-tower-max-height \
@@ -266,20 +284,37 @@ RLEBENCH_MEDIA=0 rlebench run task03/01-tower-max-height \
   -- --ve RLEBENCH_MEDIA=0 --max-retries 0
 ```
 
+To reproduce the deterministic training reference with the native images, copy
+the built upstream task to a scratch directory and apply the same Oracle launcher
+and process environment used in the adapter.
+
+```bash
+training_task=rgb-depth-model-training
+scratch=$(mktemp -d)
+cp -a "/path/to/RLE-Bench/tasks/task06/$training_task" "$scratch/"
+cp "datasets/rle-bench-gpu/task06-$training_task/solution/"{solve.sh,train_deterministic.py} \
+  "$scratch/$training_task/solution/"
+uv run harbor run -p "$scratch/$training_task" -a oracle -n 1 --override-gpus 0 \
+  --ae RLEBENCH_ASSETS=/workspace --ae CUBLAS_WORKSPACE_CONFIG=:4096:8 \
+  --ve RLEBENCH_MEDIA=0 --max-retries 0 --yes -o /path/to/native-training-jobs
+```
+
 Use `rle-bench-compare --split gpu` with the original and Harbor job roots.
 `--task-ids` restricts comparison to specified tasks. Task03 comparison requires
 the upstream ledger and handoff checks to pass before comparing scores.
+For the training task, select one native run with the matching deterministic CUDA
+settings as the original side.
 
-No upstream fork is required: both sides use the original Harbor-compatible
-oracles. Adapter submission: [harbor-index/adapters#15](https://github.com/harbor-index/adapters/pull/15)
-(draft). Registry and experiment publication remain pending.
+Both sides use the pinned upstream Oracle algorithms and verifier.
+[Draft PR #15](https://github.com/harbor-index/adapters/pull/15) covers five CPU
+tasks and four GPU tasks. Registry and full experiment artifact publication
+remain pending.
 
 ## Notes & Caveats
 
-- The native `task06/rgb-depth-model-training` Oracle ran on CUDA and produced
-  valid submissions twice. Both runs used the same Oracle import-path override,
-  seed and 54 epochs. Model weights and accuracy rewards differed, so this variant
-  remains outside the exported split pending a reproducible native baseline.
+- The upstream training Oracle uses a fixed seed, and its default cuDNN
+  convolution backward pass can still yield different gradients. The training
+  equivalence comparison uses deterministic CUDA settings on both sides.
 - These oracles are reference implementations and baselines, not optimal answers.
   Low valid rewards are preserved. In the native run, task08's base passes the
   dynamics battery but its controller misses some shelf targets; task06's moving,

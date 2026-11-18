@@ -20,6 +20,11 @@ DATASET_NAME = "rlebench/rle-bench-cpu"
 PROVENANCE = "rle-bench-provenance.json"
 ROOT_MARKER = "rle-bench-source.json"
 LOG = logging.getLogger(__name__)
+_MODEL_TRAINING = "task06/rgb-depth-model-training"
+_TRAINING_ORACLE_ENV = {
+    "RLEBENCH_ASSETS": "/workspace",
+    "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+}
 
 
 @dataclass(frozen=True)
@@ -44,6 +49,7 @@ GPU_TASKS = (
     TaskSpec("task03-01-tower-max-height", "task03/01-tower-max-height", gpu=True),
     TaskSpec("task03-05-hidden-center-of-mass", "task03/05-hidden-center-of-mass", gpu=True),
     TaskSpec("task06-method-agnostic", "task06/method-agnostic", gpu=True),
+    TaskSpec("task06-rgb-depth-model-training", _MODEL_TRAINING, gpu=True),
 )
 _SHARED_FILES = ("__init__.py", "core/__init__.py", "core/model.py",
                  "core/scoring.py", "core/media.py")
@@ -143,6 +149,27 @@ def _bundle_task03_environment(source: Path, native: Path, destination: Path) ->
     dockerfile.write_text(base.rstrip() + "\n\n" + task)
 
 
+def _wrap_training_oracle(solution: Path) -> None:
+    solve = solution / "solve.sh"
+    script = solve.read_text()
+    command = "python3 /solution/train_solution.py /logs/artifacts\n"
+    if script.count(command) != 1:
+        raise ValueError("Task06 upstream training Oracle entry point changed")
+    launcher = solution / "train_deterministic.py"
+    with launcher.open("x") as output:
+        output.write(
+            '"""Run the original Task06 Oracle with deterministic CUDA operations."""\n'
+            "import torch\n\n"
+            "from train_solution import main\n\n\n"
+            "if __name__ == '__main__':\n"
+            "    torch.use_deterministic_algorithms(True)\n"
+            "    if not torch.cuda.is_available():\n"
+            "        raise RuntimeError('The model-training Oracle requires CUDA')\n"
+            "    main()\n"
+        )
+    solve.write_text(script.replace(command, "python3 -u /solution/train_deterministic.py /logs/artifacts\n", 1))
+
+
 def export_task(source: Path, spec: TaskSpec, destination: Path) -> None:
     native = source / "tasks" / spec.upstream_path
     original = tomllib.loads((native / "task.toml").read_text())
@@ -177,6 +204,14 @@ def export_task(source: Path, spec: TaskSpec, destination: Path) -> None:
     config = portable_config((native / "task.toml").read_text())
     changes = ["Remove local prebuilt image references; preserve all other config",
                "Bundle repository-root verifier COPY inputs under tests/"]
+    if spec.upstream_path == _MODEL_TRAINING:
+        _wrap_training_oracle(destination / "solution")
+        entries = [f"{key} = {json.dumps(value)}" for key, value in _TRAINING_ORACLE_ENV.items()]
+        config = config.rstrip() + "\n\n[solution.env]\n" + "\n".join(entries) + "\n"
+        original["solution"] = {"env": _TRAINING_ORACLE_ENV}
+        changes[0] = "Remove local prebuilt image references"
+        changes.extend(["Set the public asset path in the Oracle process for the reference import",
+                        "Run the unmodified training function with deterministic CUDA algorithms"])
     if spec.family == "task03":
         name = original["task"]["name"]
         authors = [{"name": "Haitong Ma", "email": "haitongma@g.harvard.edu"}]
